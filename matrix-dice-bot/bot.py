@@ -7,12 +7,13 @@ Automatically accepts room invites and works in DMs.
 
 import asyncio
 import logging
-import random
 import re
 import sys
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
+from dice_roller import DiceRoller
 from nio import AsyncClient, InviteEvent, MatrixRoom, RoomMessageNotice, RoomMessageText
+from nio.client.async_client import JoinError, JoinResponse
 
 # Configure logging
 logging.basicConfig(
@@ -29,14 +30,8 @@ logger = logging.getLogger(__name__)
 class DiceBot:
     """Matrix bot for rolling dice in chat."""
 
-    # Supported dice types
-    SUPPORTED_DICE = [4, 6, 8, 10, 12, 20, 100]
-
-    # Fudge/Fate dice faces: [+，+, blank, blank, -, -]
-    FUDGE_FACES = ["+", "+", " ", " ", "-", "-"]
-
     # Russian command aliases
-    ROLL_COMMANDS = ["roll", "dice", "кинь", "брось", "куб", "кубы", "кости"]
+    ROLL_COMMANDS = ["roll", "dice", "кинь", "брось", "куб", "кубы", "кости", "r"]
     HELP_COMMANDS = ["help", "помощь", "справка", "h", "?"]
 
     def __init__(
@@ -52,15 +47,16 @@ class DiceBot:
         self.password = password
         self.access_token = access_token
         self.device_name = device_name
-        self.client: Optional[AsyncClient] = None
+        self.client: AsyncClient
         self.room_ids: List[str] = []
         self.auto_accept_invites = True
 
+        # Initialize dice roller
+        self.dice_roller = DiceRoller()
+
     async def connect(self) -> None:
         """Connect to Matrix server."""
-        self.client = AsyncClient(
-            self.homeserver_url, self.username, device_name=self.device_name
-        )
+        self.client = AsyncClient(self.homeserver_url, self.username)
 
         if self.access_token:
             self.client.access_token = self.access_token
@@ -80,10 +76,13 @@ class DiceBot:
         if isinstance(response, Exception):
             logger.error(f"Failed to join room: {response}")
             raise response
-        room_id = response.room_id if hasattr(response, "room_id") else room_id_or_alias
-        if room_id not in self.room_ids:
-            self.room_ids.append(room_id)
-        logger.info(f"Joined room: {room_id}")
+        if isinstance(response, JoinResponse):
+            room_id = (
+                response.room_id if hasattr(response, "room_id") else room_id_or_alias
+            )
+            if room_id not in self.room_ids:
+                self.room_ids.append(room_id)
+            logger.info(f"Joined room: {room_id}")
 
     async def send_message(
         self,
@@ -110,106 +109,20 @@ class DiceBot:
 
     def parse_dice_notation(self, notation: str) -> Optional[dict]:
         """
-        Parse dice notation like 'd20', '2d6', '3d10+5', '4d6-2', '4dF', etc.
+        Parse dice notation using DiceRoller.
         Returns dict with dice info or None if invalid.
         """
-        import re
-
-        # Check for Fudge/Fate dice (dF, dFudge, dFate) with optional modifier
-        fudge_pattern = r"^(\d*)d(fudge|fate|f)([+-]\d+)?$"
-        fudge_match = re.match(fudge_pattern, notation.strip(), re.IGNORECASE)
-
-        if fudge_match:
-            num_dice = int(fudge_match.group(1)) if fudge_match.group(1) else 4
-            modifier = int(fudge_match.group(3)) if fudge_match.group(3) else 0
-            if num_dice < 1 or num_dice > 100:
-                logger.warning(f"Invalid Fudge dice count: {num_dice}")
-                return None
-            return {"type": "fudge", "num_dice": num_dice, "modifier": modifier}
-
-        # Standard dice notation: NdS[+/-M]
-        pattern = r"^(\d*)d(\d+)([+-]\d+)?$"
-        match = re.match(pattern, notation.strip(), re.IGNORECASE)
-
-        if not match:
-            return None
-
-        num_dice = int(match.group(1)) if match.group(1) else 1
-        sides = int(match.group(2))
-        modifier = int(match.group(3)) if match.group(3) else 0
-
-        # Validate dice
-        if sides < 1 or sides > 1000:
-            logger.warning(f"Invalid dice sides: {sides}")
-            return None
-
-        if num_dice < 1 or num_dice > 100:
-            logger.warning(f"Invalid dice count: {num_dice}")
-            return None
-
-        return {
-            "type": "standard",
-            "num_dice": num_dice,
-            "sides": sides,
-            "modifier": modifier,
-        }
-
-    def roll_dice(
-        self, num_dice: int, sides: int, modifier: int = 0
-    ) -> Tuple[List[int], int]:
-        """
-        Roll standard dice and return results.
-        Returns tuple of (individual_rolls, total).
-        """
-        rolls = [random.randint(1, sides) for _ in range(num_dice)]
-        total = sum(rolls) + modifier
-        return (rolls, total)
-
-    def roll_fudge_dice(
-        self, num_dice: int, modifier: int = 0
-    ) -> Tuple[List[str], int]:
-        """
-        Roll Fudge/Fate dice and return results.
-        Each die has faces: [+，+, blank, blank, -, -]
-        Returns tuple of (individual_faces, total).
-        """
-        faces = [random.choice(self.FUDGE_FACES) for _ in range(num_dice)]
-        # Convert faces to values: + = +1, blank = 0, - = -1
-        values = [{"+": 1, " ": 0, "-": -1}[face] for face in faces]
-        total = sum(values) + modifier
-        return (faces, total)
+        return self.dice_roller.parse_dice_notation(notation)
 
     def format_roll_result(
         self,
         notation: str,
+        dice_info: dict,
         rolls: List,
         total: int,
-        modifier: int = 0,
-        dice_type: str = "standard",
     ) -> str:
-        """Format the dice roll result for display."""
-        if dice_type == "fudge":
-            # Fudge dice display: show faces and total
-            faces_str = "".join(rolls)
-            result = f"🔮 {notation} = [{faces_str}] = {total}"
-            if modifier != 0:
-                sign = "+" if modifier > 0 else ""
-                result = f"🔮 {notation} = [{faces_str}]{sign}{modifier} = {total}"
-        elif len(rolls) == 1:
-            if modifier != 0:
-                sign = "+" if modifier > 0 else ""
-                result = f"🎲 {notation} = {rolls[0]}{sign}{modifier} = {total}"
-            else:
-                result = f"🎲 {notation} = {rolls[0]}"
-        else:
-            rolls_str = " + ".join(map(str, rolls))
-            if modifier != 0:
-                sign = "+" if modifier > 0 else ""
-                result = f"🎲 {notation} = [{rolls_str}]{sign}{modifier} = {total}"
-            else:
-                result = f"🎲 {notation} = [{rolls_str}] = {total}"
-
-        return result
+        """Format the dice roll result using DiceRoller."""
+        return self.dice_roller.format_roll_result(notation, dice_info, rolls, total)
 
     def format_help_message(self) -> str:
         """Format help message for users."""
@@ -305,33 +218,17 @@ d4, d6, d8, d10, d12, d20, d100, dF (Fudge/Fate)
     async def process_dice_roll(self, room_id: str, dice_notation: str) -> None:
         """Process a dice roll command and send result."""
         try:
-            parsed = self.parse_dice_notation(dice_notation)
+            # Use DiceRoller to process the roll
+            result = self.dice_roller.process_roll(dice_notation)
 
-            if not parsed:
+            if result:
+                await self.send_message(room_id, result)
+                logger.info(f"Processed dice roll: {dice_notation} in {room_id}")
+            else:
                 await self.send_message(
                     room_id,
                     f"❌ Неправильный формат: {dice_notation}. Используйте формат NdS (например, 2d6, d20) или NdF для Fudge (4dF)",
                 )
-                return
-
-            if parsed.get("type") == "fudge":
-                num_dice = parsed["num_dice"]
-                modifier = parsed.get("modifier", 0)
-                rolls, total = self.roll_fudge_dice(num_dice, modifier)
-                result = self.format_roll_result(
-                    dice_notation, rolls, total, modifier, dice_type="fudge"
-                )
-            else:
-                num_dice = parsed["num_dice"]
-                sides = parsed["sides"]
-                modifier = parsed.get("modifier", 0)
-                rolls, total = self.roll_dice(num_dice, sides, modifier)
-                result = self.format_roll_result(
-                    dice_notation, rolls, total, modifier, dice_type="standard"
-                )
-
-            await self.send_message(room_id, result)
-            logger.info(f"Processed dice roll: {dice_notation} = {total} in {room_id}")
 
         except Exception as e:
             logger.error(f"Error processing dice roll: {e}")
