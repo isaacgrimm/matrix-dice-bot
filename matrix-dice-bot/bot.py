@@ -2,6 +2,7 @@
 """
 Matrix Dice Bot - Бот для сети Matrix с поддержкой бросания кубов.
 Supports dice notation like d20, d6, d100, and Russian commands.
+Automatically accepts room invites and works in DMs.
 """
 
 import asyncio
@@ -11,7 +12,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-from nio import AsyncClient, MatrixRoom, RoomMessageNotice, RoomMessageText
+from nio import AsyncClient, InviteEvent, MatrixRoom, RoomMessageNotice, RoomMessageText
 
 # Configure logging
 logging.basicConfig(
@@ -52,7 +53,8 @@ class DiceBot:
         self.access_token = access_token
         self.device_name = device_name
         self.client: Optional[AsyncClient] = None
-        self.room_id: Optional[str] = None
+        self.room_ids: List[str] = []
+        self.auto_accept_invites = True
 
     async def connect(self) -> None:
         """Connect to Matrix server."""
@@ -78,10 +80,10 @@ class DiceBot:
         if isinstance(response, Exception):
             logger.error(f"Failed to join room: {response}")
             raise response
-        self.room_id = (
-            response.room_id if hasattr(response, "room_id") else room_id_or_alias
-        )
-        logger.info(f"Joined room: {self.room_id}")
+        room_id = response.room_id if hasattr(response, "room_id") else room_id_or_alias
+        if room_id not in self.room_ids:
+            self.room_ids.append(room_id)
+        logger.info(f"Joined room: {room_id}")
 
     async def send_message(
         self,
@@ -241,12 +243,12 @@ d4, d6, d8, d10, d12, d20, d100, dF (Fudge/Fate)
 
     async def handle_message(self, room: MatrixRoom, event: RoomMessageText) -> None:
         """Handle incoming messages and process dice commands."""
-        # Only respond to messages in the joined room
-        if event.room_id != self.room_id:
-            return
-
         # Ignore bot's own messages
         if event.sender == self.client.user_id:
+            return
+
+        # Only process messages from rooms the bot has joined
+        if event.room_id not in self.room_ids:
             return
 
         body = event.body.strip()
@@ -335,17 +337,70 @@ d4, d6, d8, d10, d12, d20, d100, dF (Fudge/Fate)
             logger.error(f"Error processing dice roll: {e}")
             await self.send_message(room_id, f"❌ Ошибка при броске кубов: {str(e)}")
 
-    async def run(self, room_id_or_alias: str) -> None:
+    async def handle_invite(self, room: MatrixRoom, event: InviteEvent) -> None:
+        """Handle room invites and auto-accept them."""
+        if not self.auto_accept_invites:
+            logger.info(
+                f"Received invite to {room.room_id}, but auto-accept is disabled"
+            )
+            return
+
+        try:
+            logger.info(f"Received invite to room: {room.room_id}, accepting...")
+            response = await self.client.join(room.room_id)
+            if isinstance(response, Exception):
+                logger.error(f"Failed to accept invite: {response}")
+                return
+
+            room_id = response.room_id if hasattr(response, "room_id") else room.room_id
+            if room_id not in self.room_ids:
+                self.room_ids.append(room_id)
+
+            inviter = event.sender
+            logger.info(f"Successfully joined {room_id}, invited by {inviter}")
+
+            # Send welcome message to the new room
+            welcome_msg = """🎲 <b>Matrix Dice Bot подключился к комнате!</b>
+
+<b>Доступные команды:</b>
+• !roll &lt;кубы&gt; - бросить кубы (например, !roll d20, !roll 2d6)
+• !d&lt;стороны&gt; - быстро бросить куб (например, !d6)
+• !кинь &lt;кубы&gt; - русская команда
+• !help - показать справку
+
+<b>Примеры:</b>
+• !roll d20 - один куб d20
+• !roll 2d6 - два куба d6
+• !roll 3d8+2 - три куба d8 + 2
+• !roll 4dF - четыре куба Fudge/Fate
+
+Приятной игры! 🎲"""
+            await self.send_message(room_id, welcome_msg, formatted_body=welcome_msg)
+
+        except Exception as e:
+            logger.error(f"Error handling invite: {e}")
+
+    async def run(self, room_ids: Optional[List[str]] = None) -> None:
         """Main bot loop."""
         await self.connect()
-        await self.join_room(room_id_or_alias)
+
+        # Join specified rooms if provided (optional)
+        if room_ids:
+            for room_id in room_ids:
+                await self.join_room(room_id)
+            logger.info(f"Bot joined {len(room_ids)} room(s): {', '.join(room_ids)}")
+        else:
+            logger.info(
+                "Bot started without pre-configured rooms, waiting for invites..."
+            )
 
         # Add event handlers
         self.client.add_event_callback(self.handle_message, RoomMessageText)
         self.client.add_event_callback(self.handle_message, RoomMessageNotice)
+        self.client.add_event_callback(self.handle_invite, InviteEvent)
 
-        logger.info(f"Bot is now listening for dice commands in {room_id_or_alias}")
         logger.info("Supported commands: !roll d20, !d6, !3d8+2, !кинь 2d6, !help")
+        logger.info("Bot will auto-accept room invites and work in DMs")
 
         # Start syncing
         try:
@@ -374,7 +429,10 @@ async def main():
     username = os.getenv("MATRIX_USERNAME")
     password = os.getenv("MATRIX_PASSWORD")
     access_token = os.getenv("MATRIX_ACCESS_TOKEN")
-    room = os.getenv("MATRIX_ROOM", "!roomid:matrix.org")
+    rooms_str = os.getenv("MATRIX_ROOMS", os.getenv("MATRIX_ROOM", ""))
+    rooms = (
+        [r.strip() for r in rooms_str.split(",") if r.strip()] if rooms_str else None
+    )
 
     if not username:
         logger.error("MATRIX_USERNAME must be set in environment")
@@ -385,14 +443,14 @@ async def main():
         return
 
     bot = DiceBot(
-        homeserver=homeserver,
+        homeserver_url=homeserver,
         username=username,
         password=password,
         access_token=access_token,
     )
 
     try:
-        await bot.run(room)
+        await bot.run(rooms if rooms else [])
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
     except Exception as e:

@@ -39,8 +39,10 @@ MATRIX_HOMESERVER=https://matrix.org
 MATRIX_USERNAME=@yourbot:matrix.org
 MATRIX_PASSWORD=your_password_here
 
-# ID комнаты (можно использовать алиас)
-MATRIX_ROOM=!roomid:matrix.org
+# ID комнат (можно использовать алиас, несколько комнат через запятую)
+MATRIX_ROOMS=!roomid1:matrix.org,!roomid2:matrix.org,#roomalias:matrix.org
+# Для одной комнаты можно использовать MATRIX_ROOM:
+# MATRIX_ROOM=!roomid:matrix.org
 
 # Опционально: токен доступа (вместо пароля)
 # MATRIX_ACCESS_TOKEN=your_access_token_here
@@ -87,6 +89,8 @@ python bot.py
 | `!брось <кубы>` | Русская команда | `!брось 3d8+2` |
 | `!help` | Показать справку | `!help` |
 | `!roll 4dF` | Кубы Fudge/Fate | `!roll 4dF` |
+
+**Бот работает в нескольких комнатах одновременно!** Просто укажите несколько ID комнат в `MATRIX_ROOMS` через запятую.
 
 ### Формат записи кубов
 
@@ -179,6 +183,21 @@ proj/matrix-dice-bot/
 ├── bot.log          # Файл логов
 └── README.md        # Эта документация
 ```
+
+## Работа с несколькими комнатами
+
+Бот поддерживает работу сразу в нескольких комнатах Matrix. Для этого:
+
+1. Укажите несколько ID комнат в переменной окружения `MATRIX_ROOMS`:
+   ```bash
+   MATRIX_ROOMS=!roomid1:matrix.org,!roomid2:matrix.org,#roomalias:matrix.org
+   ```
+
+2. Разделитель — запятая (пробелы вокруг запятой необязательны)
+
+3. Бот автоматически присоединится ко всем указанным комнатам и будет отвечать на команды в каждой из них
+
+4. Для совместимости со старыми конфигурациями можно использовать `MATRIX_ROOM` для одной комнаты
 
 ## Решение проблем
 
